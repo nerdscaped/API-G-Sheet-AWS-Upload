@@ -1,0 +1,147 @@
+# Writtem by Matt Cadel 19/01/23
+# ******* Client identifying information has been removed *******
+
+
+# Loading Packages
+from pprint import pprint
+import pandas as pd
+import datetime
+import boto3
+import numpy as np
+from datetime import date
+from gspread_dataframe import set_with_dataframe
+import requests
+import gspread
+
+# Import Latest Version of Lane Order from Google Sheets
+gc = gspread.service_account(filename ='/Users/_______/Documents/Python/DSML/venv/lib/python3.10/site-packages/gspread/service_account.json')
+
+gc_open_lane_order = gc.open("____ Lane Order").worksheet("Lane Order") 
+gc_open_latest_change = gc.open("____ Latest Change").worksheet("Latest Change") 
+lane_order = pd.DataFrame(gc_open_lane_order.get_all_records())
+latest_change = pd.DataFrame(gc_open_latest_change.get_all_records())
+
+# Loading Date Info so data is only added if needed i.e. if a day has passed since last run through 
+today_comparison = date.today()
+today_formatted = date.today().strftime('%d/%m/%Y')
+today_formatted_save_file = date.today().strftime('%d_%m_%Y')
+lane_order['date'] = pd.to_datetime(lane_order.date, format='%d/%m/%Y', errors='coerce')
+lane_order['date'] = lane_order['date'].dt.date
+
+# The API Lane Order Downloader - this downloads the actual lane ordering
+
+if lane_order.date.max() < today_comparison:
+    print('\nLane Order Downloader initiated\n')
+    
+    devices = {'platform_type': ['mobile', 'tal', 'web', 'roku', 'apple'], 'platform_name': [['ios', 'android'], ['amazonfire', 'virginmedia', 'youview', 'freeviewplay', 'freesat', 'samsung'], ['____'], ['roku', 'nowtv'], ['appletv']]}
+        
+    results = pd.DataFrame(columns = ['lane_number', 'lane_name', 'page', 'date', 'text_format', 'platform', 'user_experience', 'platform_category'])
+        
+    # This loads the API with the platform type and name needed to get lane ordering for all devices
+
+    for t, i in enumerate(devices['platform_type']):
+        for n in devices['platform_name'][t]:
+            warm_url = "https://homepages.____.co.uk/build?anon_id=abcd123456&account_id=13770364&platform_type={i}&platform_name={n}".format(i=i, n=n)
+            cold_url = "https://homepages.____.co.uk/build?anon_id=abcd123456&platform_type={i}&platform_name={n}".format(i=i, n=n)
+
+            warm_response = requests.get(warm_url).json().get('homepage_structure')
+            cold_response = requests.get(cold_url).json().get('homepage_structure')
+
+            lane_number = 1
+            warm_result = {'lane_number' : [], 'lane_name': [], 'page': [], 'date': [], 'text_format': [], 'platform': [], 'user_experience': [], 'platform_category': []}
+            cold_result = {'lane_number' : [], 'lane_name': [], 'page': [], 'date': [], 'text_format': [], 'platform': [], 'user_experience': [], 'platform_category': []}
+
+            print('Currently Loading...\n',i,'-', n,'\n')
+
+            # This gets the lane ordering for existing 'warm' users
+            for w in warm_response:
+                warm_result['lane_number'].append(lane_number)
+                warm_result['text_format'].append("'"+str(lane_number)+"'")
+                warm_result['page'].append('home')
+                warm_result['date'].append(today_formatted)
+
+                warm_result['user_experience'].append('warm')
+
+                if n == '____':
+                    warm_result['platform_category'].append('web')
+                else:
+                    warm_result['platform_category'].append(n)
+                
+                if i == 'apple' or i == 'roku':
+                    warm_result['platform'].append('tv sticks')
+                else:
+                    warm_result['platform'].append(i)
+
+                if w['module_type'] == 'brand_promo':
+                    warm_result['lane_name'].append('brand promo')
+                elif w['ati_rail_title'] == 'Most Popular' and w['module_type'] != 'most_pop_any':
+                    warm_result['lane_name'].append('Most Popular Yesterday')
+                else:
+                    warm_result['lane_name'].append(w['ati_rail_title'])
+
+                lane_number += 1
+            
+            warm_result = pd.DataFrame.from_dict(warm_result)
+            results = pd.concat([results, warm_result])
+
+            lane_number = 1
+
+            # This gets the lane ordering for new 'cold' users
+            for c in cold_response:
+                cold_result['lane_number'].append(lane_number)
+                cold_result['text_format'].append("'"+str(lane_number)+"'")
+                cold_result['page'].append('home')
+                cold_result['date'].append(today_formatted)
+
+                cold_result['user_experience'].append('cold')
+
+                if n == '____':
+                    cold_result['platform_category'].append('web')
+                else:
+                    cold_result['platform_category'].append(n)
+
+                if i == 'apple' or i == 'roku':
+                    cold_result['platform'].append('tv sticks')
+                else:
+                    cold_result['platform'].append(i)
+
+                if c['module_type'] == 'brand_promo':
+                    cold_result['lane_name'].append('brand promo')
+                elif c['ati_rail_title'] == 'Most Popular' and c['module_type'] != 'most_pop_any':
+                    cold_result['lane_name'].append('Most Popular Yesterday')
+                else:
+                    cold_result['lane_name'].append(c['ati_rail_title'])
+
+                lane_number += 1
+            
+            cold_result = pd.DataFrame.from_dict(cold_result)
+
+            results = pd.concat([results, cold_result])
+
+            lane_order = pd.concat([results, lane_order])
+
+    save_string = 'results_' + today_formatted_save_file + '.csv'
+    results.to_csv('/Users/mattcadel/Documents/Python/results_' + save_string, index=False)
+
+
+    gc_open_lane_order.clear()
+    set_with_dataframe(worksheet=gc_open_lane_order, dataframe=lane_order, include_index=False, include_column_header=True, resize=True)
+    print('Lane Ordering Data Loaded to G-Sheet')
+
+    boto3.setup_default_session(profile_name="prod")
+
+    s3 = boto3.client('s3')
+    file_path = '/Users/mattcadel/Documents/Python/results_' + save_string
+    bucket_name = '____'
+    obj_name = 'data/lane_order/' + save_string
+
+    s3.upload_file(file_path,
+            bucket_name,
+            obj_name)
+    print('\nData loaded to AWS')
+
+else:
+    if lane_order.date.max() == today_comparison:
+        print("Lane Ordering is already updated with today's lane ordering, therefore the lane order code has not been run.")
+    else:
+        print('There is an issue with the date in the lane ordering sheet. Please investigate.')
